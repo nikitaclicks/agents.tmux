@@ -34,6 +34,8 @@ DEFAULT_CONFIG = {
         "waiting_tail_patterns": [
             r"Asked user",
             r"AskUser",
+            r"↑↓ to select",       # interactive question dialog footer (copilot, claude)
+            r"Enter to confirm",   # same dialog, alternate marker
         ],
         # Lines matching any of these are skipped when picking the display snippet
         "skip_snippet_patterns": [
@@ -195,15 +197,17 @@ def _classify_status(pane_text: str, rules: _Rules, pid: str = "") -> tuple[str,
     if pid and _cpu_percent(pid) > rules.cpu_threshold:
         return "busy", snippet
 
+    # Waiting (tail-only) BEFORE busy_patterns: the tail reflects current state,
+    # while busy_patterns scan the full pane and can falsely match static UI
+    # chrome (e.g. "Esc to cancel" appears in the question dialog footer too).
+    for r in rules.waiting_tail_res:
+        if r.search(tail):
+            return "waiting", snippet
+
     # Text-based busy fallback (CPU may not have ramped yet for a brand-new tool call)
     for r in rules.busy_res:
         if r.search(pane_text):
             return "busy", snippet
-
-    # Waiting: tail-only to avoid false positives from old scrollback content
-    for r in rules.waiting_tail_res:
-        if r.search(tail):
-            return "waiting", snippet
 
     # Agent-specific idle patterns (e.g. pi's INSERT prompt)
     for r in rules.idle_tail_res:

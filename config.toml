@@ -33,7 +33,12 @@ busy_patterns = [
 ]
 
 # Regex patterns searched in the last tail_lines only; any match → waiting.
-waiting_tail_patterns = ['Asked user', 'AskUser']
+waiting_tail_patterns = [
+    'Asked user',
+    'AskUser',
+    '↑↓ to select',     # interactive question dialog footer (copilot, claude)
+    'Enter to confirm', # same dialog, alternate marker
+]
 
 # ── Agents ─────────────────────────────────────────────────────────────────
 # Each agent entry must have: name, process_pattern

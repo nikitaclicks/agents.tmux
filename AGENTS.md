@@ -26,12 +26,13 @@ Every `[[agents]]` block in `config.toml` supports these fields:
 For each matched agent pane, status is determined as follows:
 
 1. **CPU** — if `ps -p PID -o %cpu=` > `cpu_busy_threshold` → **busy**
-2. **Busy patterns** — global `busy_patterns` + agent's own `busy_patterns` searched in full pane text → **busy**
-3. **Waiting patterns** — global `waiting_tail_patterns` searched in last `tail_lines` only → **waiting**
+2. **Waiting patterns** — global `waiting_tail_patterns` searched in last `tail_lines` only → **waiting**
+3. **Busy patterns** — global `busy_patterns` + agent's own `busy_patterns` searched in full pane text → **busy**
 4. **Idle tail patterns** — agent's own `idle_tail_patterns` searched in last `tail_lines` → **idle**
 5. **Default** → **idle**
 
 CPU is checked first so a genuinely active process always shows busy regardless of text.
+Waiting is checked before busy patterns because the tail reflects current state, while busy_patterns scan the full pane and can falsely match static UI chrome (e.g. "Esc to cancel" appears in question dialogs too).
 Waiting patterns are tail-only to avoid false positives from old scrollback content.
 
 ---
