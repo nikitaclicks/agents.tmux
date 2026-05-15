@@ -1,42 +1,56 @@
 # agents.tmux
 
-macOS menu bar app that watches your tmux sessions and shows the live status of AI coding agents — Claude Code, GitHub Copilot, pi, and anything else you configure.
+macOS menu bar app that watches your tmux sessions and shows the live status of AI coding agents — Claude Code, GitHub Copilot, Cursor, opencode, pi, and anything you configure.
 
-## What it does
+![agents.tmux menu](assets/menu.png)
 
-Polls your tmux panes every 2 seconds and shows a color-coded badge:
+## The idea
 
-| Icon | Meaning |
-|------|---------|
-| `🟢 2` | 2 agents working — you're free |
-| `🟡 1` | 1 agent waiting for input, others still running — prepare |
+When you run multiple AI agents in parallel you constantly alt-tab to check if anyone needs your input. This app puts a single glyph in your menu bar that tells you at a glance:
+
+| Badge | Meaning |
+|-------|---------|
+| `🟢 2` | 2 agents busy — you're free, go do something else |
+| `🟡 1` | 1 agent waiting for you, others still running — start wrapping up |
 | `🔴 2` | all 2 agents waiting on you — act now |
 | `○` | all idle |
 | `◌` | no agents found |
 
-Click the icon to see each agent's window, what it's doing last, and jump directly to it in iTerm2.
+Click the badge to see a per-agent status line and jump straight to its tmux window in iTerm2.
 
 ## Requirements
 
 - macOS
 - Python 3.11+ (or 3.9+ with `pip install tomli`)
 - tmux
-- iTerm2 (optional — used to focus the terminal on window click)
+- iTerm2 (optional — for the click-to-focus feature)
 
 ## Install
 
 ```bash
 git clone https://github.com/yourname/agents.tmux ~/dev/agents.tmux
 cd ~/dev/agents.tmux
-pip3 install rumps
-python3 app.py
+bash run.sh          # installs deps and starts the app
 ```
 
-Or use the launcher (installs deps automatically):
+The menu bar icon appears immediately. To verify detection without the GUI:
 
 ```bash
-bash run.sh
+python3 tmux_agents.py
 ```
+
+```
+Session: auto  |  Poll: 2s  |  Agents: ['claude', 'copilot', 'pi', 'cursor', 'opencode']
+
+⚡ ◇ copilot  @ gemmas          [busy   ]  Esc to cancel
+⚡ ◆ claude   @ feature-branch  [busy   ]  ✻ Editing…
+○ ◆ claude   @ main             [idle   ]  ❯
+○ π pi       @ notes            [idle   ]  ~/dev/notes (main)
+○ ▣ opencode @ agents-demo      [idle   ]  14.4K (6%)  ctrl+p commands
+○ ⌶ cursor   @ [external]       [idle   ]
+```
+
+Agents running outside tmux (in their own terminal window) are detected via `ps` and shown with `[external]` as the window name.
 
 ## Run on login
 
@@ -44,92 +58,146 @@ Add `run.sh` as a Login Item in **System Settings → General → Login Items**.
 
 ## Configuration
 
-Edit `config.toml` in the project directory (or `~/.config/agents.tmux/config.toml`):
+`config.toml` lives next to `app.py`, or at `~/.config/agents.tmux/config.toml` for a user-level install.
 
 ```toml
-# "auto" deduplicates mirrored tmux session groups (e.g. main + phone).
-# Or specify a session name: session = "main"
-session = "auto"
+session = "auto"      # or a specific session name, e.g. "main"
+poll_interval = 2     # seconds
 
-poll_interval = 2  # seconds
+# ── Detection rules ────────────────────────────────────────────────────────
+[detection]
+# Primary busy signal: CPU % above this threshold → busy, no text parsing needed.
+# Raise it (e.g. 20.0) if brief terminal focus events cause false positives.
+cpu_busy_threshold = 10.0
 
+# Only the last N lines of pane output are checked for waiting/idle signals.
+# This prevents old scrollback text from triggering false "waiting" states.
+tail_lines = 5
+
+# Regexes searched in the full pane text; any match → busy.
+# These catch activity that shows in output before CPU ramps up.
+busy_patterns = [
+    '✻ \w+…',         # Claude Code: active thinking
+    '⏺ .+…',          # Claude Code: in-progress tool call
+    '↓\s*\d+.*token', # active token stream
+]
+
+# Regexes searched in the last tail_lines only; any match → waiting.
+waiting_tail_patterns = ['Asked user', 'AskUser']
+
+# ── Agents ─────────────────────────────────────────────────────────────────
 [[agents]]
 name    = "claude"
 icon    = "◆"
-process_pattern = '^\d+\.\d+\.\d+$'   # Claude Code shows as its version binary
+process_pattern = '^\d+\.\d+\.\d+$'   # Claude Code runs as its version binary
 
 [[agents]]
 name    = "copilot"
 icon    = "◇"
 process_pattern = '^copilot$'
+busy_patterns   = ['Esc to cancel']    # only present during an active run
 
 [[agents]]
 name    = "pi"
 icon    = "π"
-process_pattern = '^node$'
-window_pattern  = '^pi'   # narrow by window name to avoid matching other node processes
+process_pattern    = '^node$'
+content_pattern    = '\d+\.\d+%/\d+k' # pi's token-budget bar (always in last 2 lines)
+idle_tail_patterns = ['─{4,}\s*INSERT']
+
+[[agents]]
+name            = "cursor"
+icon            = "⌶"
+process_pattern = '^agent$'
+window_pattern  = '^cursor'            # tmux: window must be named cursor*
+args_pattern    = 'cursor.agent'       # external: matches cursor-agent in the binary path
+
+[[agents]]
+name          = "opencode"
+icon          = "▣"
+process_pattern = '^opencode$'
+busy_patterns   = ['esc interrupt']    # appears in footer during generation
 ```
 
-### Adding an agent
+### Adding a new agent
 
-1. Find what `pane_current_command` your agent shows as:
+1. Find the process name tmux sees for your agent:
    ```bash
    tmux list-panes -a -F '#{window_name} #{pane_current_command}'
    ```
-2. Add a `[[agents]]` block to `config.toml` with a matching `process_pattern`.
-3. If the process name is generic (e.g. `node`, `python3`), add `window_pattern` to narrow by window name.
+2. Add a `[[agents]]` block with a matching `process_pattern`.
+3. If the process name is generic (e.g. `node`, `python3`), add `window_pattern` or `content_pattern` to narrow it down.
+4. Optionally add `busy_patterns` (text that means busy) and `idle_tail_patterns` (text in the last few lines that means idle/awaiting input).
 
-## Supported agents (built-in detection)
+Example for a custom agent:
+```toml
+[[agents]]
+name            = "aider"
+icon            = "△"
+process_pattern = '^aider$'
+busy_patterns      = ['Tokens:']   # appears while aider is thinking
+idle_tail_patterns = ['^> $']      # aider's input prompt
+```
 
-Detection uses **CPU sampling as the primary busy signal**, with pane-text patterns as fallback for finer distinctions:
+## Built-in agents
 
 | Agent | Process | Busy signal | Waiting signal |
 |-------|---------|-------------|----------------|
-| Claude Code | `x.y.z` version pattern | CPU > 5% OR `✻ Verb…` (active ellipsis) OR `⏺ Something…` (active tool call) | `Asked user` / `AskUser` in output |
-| GitHub Copilot | `copilot` | CPU > 5% OR `Esc to cancel` in output | — |
-| pi | `node` + token budget status bar | CPU > 5% | `──── INSERT` prompt |
+| Claude Code | `x.y.z` version binary | CPU > 10% · `✻ Verb…` · `⏺ Tool…` | `Asked user` in tail |
+| GitHub Copilot | `copilot` | CPU > 10% · `Esc to cancel` | — |
+| Cursor agent | `agent` (window `cursor*`) | CPU > 10% | — |
+| opencode | `opencode` | CPU > 10% · `esc interrupt` in footer | — |
+| pi | `node` + token budget bar | CPU > 10% | `──── INSERT` prompt |
 
-Other agents fall back to CPU sampling + generic spinner/thinking text detection.
+**Cursor agent** runs as `~/.local/bin/agent`. Because `agent` is a generic name, two filters are applied:
+- **In tmux**: the window must be named `cursor*` — rename it with `tmux rename-window cursor`.
+- **External** (running outside tmux): matched by `args_pattern = 'cursor.agent'` against the full command line. No window name needed.
 
 ## How it works
 
-Three commands do everything:
+Detection runs two signals on every poll tick and combines them:
+
+**1. CPU sampling** — primary signal. `ps -p PID -o %cpu=` for the agent process. Above the threshold means busy, full stop. Reliable and agent-agnostic.
+
+**2. Text patterns** — fallback and refinement. Used for activity that shows in output before CPU ramps (a tool call just starting), and for the `waiting` state, which CPU alone can't distinguish from `idle` (both are near 0%).
+
+**External process detection** — agents running outside tmux (in their own terminal, or daemonised) are found via `ps -A`. Each matched pane's foreground process PIDs are tracked so the same agent is never counted twice.
+
+The commands run per poll tick:
 
 ```bash
-# find all panes, their running process, and their PID
-tmux list-panes -a -F '#{session_name}:#{window_index}.#{pane_index} #{pane_id} #{pane_pid} #{window_name} #{pane_current_command}'
-
-# read the last N lines of a pane (for waiting/text detection)
-tmux capture-pane -pt 'main:5.1' -S -10
-
-# sample CPU usage for a process
-ps -p PID -o %cpu=
+tmux list-panes -a -F '... #{pane_pid} #{pane_current_command}'
+tmux capture-pane -pt TARGET -S -10       # per matched pane
+ps -p PID -o %cpu=                        # per matched agent
+ps -A -o pid=,pcpu=,comm=,args=           # external scan
 ```
 
-`tmux_agents.py` runs these on every poll tick:
+Mirrored tmux session groups (e.g. a `main` session and a `phone` session pointing at the same windows) are deduplicated by `#{pane_id}` so each physical pane is counted once.
 
-1. **CPU sampling** (`ps`) — the primary `busy` signal. > 5% CPU means the process is actively computing, regardless of what's on screen.
-2. **Text patterns** — fallback for transient states and the finer `waiting` distinction (only text reliably shows "Asked user a question").
-3. The result is handed to `app.py` which renders the menu bar via [rumps](https://github.com/jaredks/rumps).
+## Troubleshooting
 
-The `#{pane_id}` field is used to deduplicate mirrored session groups — two sessions sharing the same windows produce the same `pane_id`, so only one copy is counted.
+**Agent not detected**
+Run `tmux list-panes -a -F '#{window_name} #{pane_current_command}'` and check what process name your agent shows. Update `process_pattern` in `config.toml` to match.
 
-## Smoke test
+**Agent always shows idle**
+Lower `cpu_busy_threshold` in `[detection]`, or add a `busy_patterns` entry matching text that appears when the agent is active.
 
-Run without the GUI to check what's detected:
+**Agent shows waiting when it shouldn't**
+The `waiting_tail_patterns` matched something in old scrollback. Either reduce `tail_lines` or make the patterns more specific.
 
-```bash
-python3 tmux_agents.py
-```
+**Cursor not detected**
+If running inside tmux, rename the window to `cursor` with `tmux rename-window cursor`. If running externally, verify the binary path contains `cursor-agent` — check with `ps -A -o comm=,args= | grep agent`.
 
-Output:
-```
-Session: auto  |  Poll: 2s  |  Agents: ['claude', 'copilot', 'pi']
+**App doesn't start / `rumps` not found**
+Run `pip3 install rumps` manually, or use `bash run.sh` which installs deps automatically.
 
-⚡ ◆ claude   @ pr-87902   [busy   ]  ✻ Shenaniganing…
-💬 ◆ claude   @ 2.1.142    [waiting]  ❯ let's ship it
-◇ ◇ copilot  @ hackathon  [idle   ]
-```
+## Contributing
+
+The project is intentionally small — two files, one config. To add built-in support for a new agent, add an entry to `DEFAULT_CONFIG["agents"]` in `tmux_agents.py` and document it here.
+
+Pull requests welcome for:
+- New agent detection patterns
+- Alternative terminal support (Warp, Ghostty, Terminal.app)
+- Linux / X11 equivalent of the iTerm2 focus call
 
 ## License
 

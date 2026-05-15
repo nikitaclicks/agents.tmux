@@ -65,3 +65,20 @@ process_pattern = '^node$'
 content_pattern = '\d+\.\d+%/\d+k'
 # pi's "──── INSERT" prompt in the tail means it's at the input prompt = idle
 idle_tail_patterns = ['─{4,}\s*INSERT']
+
+[[agents]]
+name    = "cursor"
+icon    = "⌶"
+# cursor-agent runs as /Users/$USER/.local/bin/agent (exec -a preserves the name)
+process_pattern = '^agent$'
+# window_pattern: used when cursor runs inside a tmux pane (name the window "cursor")
+window_pattern  = '^cursor'
+# args_pattern: used when cursor runs outside tmux — matches the full command line
+args_pattern    = 'cursor.agent'
+
+[[agents]]
+name    = "opencode"
+icon    = "▣"
+process_pattern = '^opencode$'
+# "esc interrupt" appears in the footer progress bar during generation
+busy_patterns = ['esc interrupt']
