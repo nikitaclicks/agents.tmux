@@ -1,0 +1,67 @@
+# agents.tmux configuration
+
+# Which tmux session to watch.
+# "auto" = deduplicate mirrored session groups by pane ID (recommended).
+# Or set a specific session name, e.g. session = "main"
+session = "auto"
+
+# How often to poll tmux panes (seconds)
+poll_interval = 2
+
+# ── Detection rules ────────────────────────────────────────────────────────
+# Controls how pane output is classified as busy / waiting / idle.
+# You can tune these without touching any Python.
+[detection]
+
+# CPU % above which a process is considered busy, regardless of output text.
+# Set lower (e.g. 5.0) to catch light activity; higher (e.g. 20.0) to ignore
+# brief wake-ups from terminal focus events.
+cpu_busy_threshold = 10.0
+
+# Only the last N lines of pane output are checked for waiting/idle patterns.
+# Prevents old scrollback text (e.g. a diff containing "Asked user") from
+# triggering false waiting states.
+tail_lines = 5
+
+# Regex patterns searched in the full pane text; any match → busy.
+# These supplement CPU detection for activity that shows in output before
+# the process ramps up measurable CPU (e.g. a tool call just starting).
+busy_patterns = [
+    '✻ \w+…',          # Claude Code: active thinking (trailing … = still running)
+    '⏺ .+…',           # Claude Code: in-progress tool call
+    '↓\s*\d+.*token',  # active token stream
+]
+
+# Regex patterns searched in the last tail_lines only; any match → waiting.
+waiting_tail_patterns = ['Asked user', 'AskUser']
+
+# ── Agents ─────────────────────────────────────────────────────────────────
+# Each agent entry must have: name, process_pattern
+# Optional per-agent fields:
+#   icon                — displayed in the menu bar (1–2 chars)
+#   window_pattern      — additional filter on tmux window name
+#   content_pattern     — additional filter on pane text (for generic processes like node)
+#   busy_patterns       — extra regexes (full text) that mean this agent is busy
+#   idle_tail_patterns  — tail regexes that mean this agent is idle (e.g. input prompt)
+
+[[agents]]
+name    = "claude"
+icon    = "◆"
+# Claude Code runs as its own version-number binary (e.g. 2.1.142)
+process_pattern = '^\d+\.\d+\.\d+$'
+
+[[agents]]
+name    = "copilot"
+icon    = "◇"
+process_pattern = '^copilot$'
+# "Esc to cancel" only appears in copilot output during an active run
+busy_patterns = ['Esc to cancel']
+
+[[agents]]
+name    = "pi"
+icon    = "π"
+# pi runs as node — narrow by its token-budget status bar (always in last 2 lines)
+process_pattern = '^node$'
+content_pattern = '\d+\.\d+%/\d+k'
+# pi's "──── INSERT" prompt in the tail means it's at the input prompt = idle
+idle_tail_patterns = ['─{4,}\s*INSERT']
