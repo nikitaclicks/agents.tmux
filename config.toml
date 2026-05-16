@@ -87,3 +87,14 @@ icon    = "▣"
 process_pattern = '^opencode$'
 # "esc interrupt" appears in the footer progress bar during generation
 busy_patterns = ['esc interrupt']
+
+[[agents]]
+name    = "codex"
+icon    = "◈"
+# Codex CLI runs as node in tmux; narrow it by the descendant process args so it
+# doesn't collide with other node-based agents like pi.
+process_pattern = '^node$'
+tmux_args_pattern = '@openai/codex|(?:^|[ /])codex(?:\s|$)|/codex/codex'
+# Outside tmux, also match the full command line because the process name is
+# usually node or a vendored binary path.
+args_pattern    = '@openai/codex|(?:^|[ /])codex(?:\s|$)|/codex/codex'

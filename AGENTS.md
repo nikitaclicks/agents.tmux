@@ -15,6 +15,7 @@ Every `[[agents]]` block in `config.toml` supports these fields:
 | `icon` | no | string | 1–2 char glyph shown next to the name (default: `?`) |
 | `window_pattern` | no | regex | Additional filter on the tmux window name; use when `process_pattern` is ambiguous (e.g. `node`, `python3`, `agent`) |
 | `content_pattern` | no | regex | Additional filter on the full pane text; use when the process name alone isn't enough |
+| `tmux_args_pattern` | no | regex | Matched against full command lines of processes running inside the tmux pane; use when `pane_current_command` is generic but a child process path/argv is distinctive |
 | `args_pattern` | no | regex | Matched against the full process command line from `ps`; used for **external** detection when `process_pattern` can't match (e.g. binary path differs from exec name) |
 | `busy_patterns` | no | list of regexes | Searched in full pane text; any match → busy. Supplements global `busy_patterns` |
 | `idle_tail_patterns` | no | list of regexes | Searched in the last `tail_lines` of pane text; any match → idle (overrides default idle fallback) |
@@ -44,6 +45,7 @@ Waiting patterns are tail-only to avoid false positives from old scrollback cont
 - Matches on `pane_current_command` (basename of foreground process) via `process_pattern`
 - Optionally narrows by `window_name` via `window_pattern`
 - Optionally narrows by pane text via `content_pattern`
+- Optionally narrows by descendant process command lines via `tmux_args_pattern`
 - Captures pane text for text-based status signals
 
 **External process scan** (secondary):
@@ -106,6 +108,13 @@ name            = "opencode"
 icon            = "▣"
 process_pattern = '^opencode$'
 busy_patterns   = ['esc interrupt']      # footer text during generation
+
+[[agents]]
+name              = "codex"
+icon              = "◈"
+process_pattern   = '^node$'
+tmux_args_pattern = '@openai/codex|(?:^|[ /])codex(?:\s|$)|/codex/codex'
+args_pattern      = '@openai/codex|(?:^|[ /])codex(?:\s|$)|/codex/codex'
 ```
 
 ---
@@ -136,9 +145,11 @@ process_pattern = '^gemini$'
 
 ```toml
 [[agents]]
-name            = "codex"
-icon            = "◈"
-process_pattern = '^codex$'
+name              = "codex"
+icon              = "◈"
+process_pattern   = '^node$'
+tmux_args_pattern = '@openai/codex|(?:^|[ /])codex(?:\s|$)|/codex/codex'
+args_pattern      = '@openai/codex|(?:^|[ /])codex(?:\s|$)|/codex/codex'
 ```
 
 ### A Node.js-based agent (generic `node` process)

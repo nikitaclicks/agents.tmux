@@ -82,6 +82,14 @@ DEFAULT_CONFIG = {
             # "esc interrupt" appears in the footer progress bar during generation
             "busy_patterns": [r"esc interrupt"],
         },
+        {
+            "name": "codex",
+            "icon": "◈",
+            "process_pattern": r"^node$",
+            # codex CLI often runs under a generic node foreground process in tmux
+            "tmux_args_pattern": r"@openai/codex|(?:^|[ /])codex(?:\s|$)|/codex/codex",
+            "args_pattern": r"@openai/codex|(?:^|[ /])codex(?:\s|$)|/codex/codex",
+        },
     ],
 }
 
@@ -120,6 +128,14 @@ class _Rules:
     waiting_tail_res: list  # compiled — searched in tail only
     idle_tail_res: list     # compiled — searched in tail only
     skip_re: re.Pattern     # lines matching this are skipped for the snippet
+
+
+@dataclass
+class _Proc:
+    pid: str
+    ppid: str
+    comm: str
+    args: str
 
 
 def _make_rules(config: dict, agent_def: dict) -> _Rules:
@@ -221,16 +237,39 @@ def _classify_status(pane_text: str, rules: _Rules, pid: str = "") -> tuple[str,
 # Discovery helpers
 # ---------------------------------------------------------------------------
 
-def _foreground_pids(pane_pid: str, cmd_name: str) -> set[str]:
-    """Return PIDs of processes named cmd_name that are direct children of pane_pid,
-    plus pane_pid itself (covers the case where the agent is the pane process directly)."""
-    pids = {pane_pid}
-    children = _run(["pgrep", "-P", pane_pid, "-x", cmd_name]).strip().splitlines()
-    for p in children:
-        p = p.strip()
-        if p:
-            pids.add(p)
-    return pids
+def _process_snapshot() -> tuple[dict[str, _Proc], dict[str, list[_Proc]]]:
+    by_pid: dict[str, _Proc] = {}
+    children: dict[str, list[_Proc]] = {}
+    raw = _run(["ps", "-A", "-o", "pid=,ppid=,comm=,args="])
+    for line in raw.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) < 3:
+            continue
+        pid, ppid, comm = parts[0], parts[1], parts[2]
+        args = parts[3] if len(parts) == 4 else ""
+        proc = _Proc(pid=pid, ppid=ppid, comm=comm, args=args)
+        by_pid[pid] = proc
+        children.setdefault(ppid, []).append(proc)
+    return by_pid, children
+
+
+def _descendant_procs(root_pid: str, children: dict[str, list[_Proc]]) -> list[_Proc]:
+    found: list[_Proc] = []
+    stack = list(children.get(root_pid, []))
+    while stack:
+        proc = stack.pop()
+        found.append(proc)
+        stack.extend(children.get(proc.pid, []))
+    return found
+
+
+def _pane_procs(pane_pid: str, by_pid: dict[str, _Proc], children: dict[str, list[_Proc]]) -> list[_Proc]:
+    procs: list[_Proc] = []
+    root = by_pid.get(pane_pid)
+    if root:
+        procs.append(root)
+    procs.extend(_descendant_procs(pane_pid, children))
+    return procs
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +291,7 @@ def discover_agents(config: dict | None = None) -> list[Agent]:
             "process_re": re.compile(ag["process_pattern"]),
             "window_re":  re.compile(ag["window_pattern"])  if ag.get("window_pattern")  else None,
             "content_re": re.compile(ag["content_pattern"]) if ag.get("content_pattern") else None,
+            "tmux_args_re": re.compile(ag["tmux_args_pattern"]) if ag.get("tmux_args_pattern") else None,
             "args_re":    re.compile(ag["args_pattern"])    if ag.get("args_pattern")    else None,
             "rules": _make_rules(config, ag),
         })
@@ -260,9 +300,10 @@ def discover_agents(config: dict | None = None) -> list[Agent]:
         "tmux", "list-panes", "-a",
         "-F", "#{session_name}:#{window_index}.#{pane_index} #{pane_id} #{pane_pid} #{window_name} #{pane_current_command}",
     ])
+    proc_by_pid, proc_children = _process_snapshot()
 
     seen_pane_ids: set[str] = set()
-    seen_pids: set[str] = set()   # foreground process PIDs of matched tmux agents
+    seen_pids: set[str] = set()   # PIDs already accounted for by matched tmux panes
     agents: list[Agent] = []
 
     # --- tmux pane scan ---
@@ -286,12 +327,26 @@ def discover_agents(config: dict | None = None) -> list[Agent]:
             if m["window_re"] and not m["window_re"].search(window_name):
                 continue
 
+            pane_procs = _pane_procs(pane_pid, proc_by_pid, proc_children)
+            agent_pid = pane_pid
+
+            for proc in pane_procs:
+                if proc.comm == cmd:
+                    agent_pid = proc.pid
+                    break
+
+            if m["tmux_args_re"]:
+                matched_proc = next((p for p in pane_procs if m["tmux_args_re"].search(p.args)), None)
+                if not matched_proc:
+                    continue
+                agent_pid = matched_proc.pid
+
             pane_text = _run(["tmux", "capture-pane", "-pt", target, "-S", "-10"])
 
             if m["content_re"] and not m["content_re"].search(pane_text):
                 continue
 
-            status, snippet = _classify_status(pane_text, m["rules"], pane_pid)
+            status, snippet = _classify_status(pane_text, m["rules"], agent_pid)
             agents.append(Agent(
                 name=m["name"],
                 icon=m["icon"],
@@ -300,7 +355,7 @@ def discover_agents(config: dict | None = None) -> list[Agent]:
                 status=status,
                 snippet=snippet,
             ))
-            seen_pids.update(_foreground_pids(pane_pid, cmd))
+            seen_pids.update(p.pid for p in pane_procs)
             break
 
     # --- external process scan (agents running outside tmux) ---

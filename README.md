@@ -1,6 +1,6 @@
 # agents.tmux
 
-macOS menu bar app that watches your tmux sessions and shows the live status of AI coding agents — Claude Code, GitHub Copilot, Cursor, opencode, pi, and anything you configure.
+macOS menu bar app that watches your tmux sessions and shows the live status of AI coding agents — Claude Code, GitHub Copilot, Cursor, Codex, opencode, pi, and anything you configure.
 
 ![agents.tmux menu](assets/menu.png)
 
@@ -40,13 +40,14 @@ python3 tmux_agents.py
 ```
 
 ```
-Session: auto  |  Poll: 2s  |  Agents: ['claude', 'copilot', 'pi', 'cursor', 'opencode']
+Session: auto  |  Poll: 2s  |  Agents: ['claude', 'copilot', 'pi', 'cursor', 'opencode', 'codex']
 
 ⚡ ◇ copilot  @ gemmas          [busy   ]  Esc to cancel
 ⚡ ◆ claude   @ feature-branch  [busy   ]  ✻ Editing…
 ○ ◆ claude   @ main             [idle   ]  ❯
 ○ π pi       @ notes            [idle   ]  ~/dev/notes (main)
 ○ ▣ opencode @ agents-demo      [idle   ]  14.4K (6%)  ctrl+p commands
+○ ◈ codex    @ codex-worktree   [idle   ]  /model gpt-5-codex
 ○ ⌶ cursor   @ [external]       [idle   ]
 ```
 
@@ -126,6 +127,15 @@ name          = "opencode"
 icon          = "▣"
 process_pattern = '^opencode$'
 busy_patterns   = ['esc interrupt']    # appears in footer during generation
+
+[[agents]]
+name            = "codex"
+icon            = "◈"
+# Codex CLI runs as node in tmux, so narrow it by the descendant process args
+process_pattern = '^node$'
+tmux_args_pattern = '@openai/codex|(?:^|[ /])codex(?:\s|$)|/codex/codex'
+# external: match the full command line because comm is node / a vendored binary path
+args_pattern    = '@openai/codex|(?:^|[ /])codex(?:\s|$)|/codex/codex'
 ```
 
 ### Adding a new agent
@@ -154,9 +164,14 @@ idle_tail_patterns = ['^> $']      # aider's input prompt
 |-------|---------|-------------|----------------|
 | Claude Code | `x.y.z` version binary | CPU > 10% · `✻ Verb…` · `⏺ Tool…` | `Asked user` in tail |
 | GitHub Copilot | `copilot` | CPU > 10% · `Esc to cancel` | — |
+| Codex | `node` + Codex args | CPU > 10% | — |
 | Cursor agent | `agent` (window `cursor*`) | CPU > 10% | — |
 | opencode | `opencode` | CPU > 10% · `esc interrupt` in footer | — |
 | pi | `node` + token budget bar | CPU > 10% | `──── INSERT` prompt |
+
+**Codex** currently runs as `node` in tmux in this setup. Two filters are applied:
+- **In tmux**: the pane must contain a descendant process whose full command line matches the Codex package or vendored binary path.
+- **External** (running outside tmux): matched by `args_pattern` against the full command line, covering both the `@openai/codex` package path and the vendored `codex` binary path.
 
 **Cursor agent** runs as `~/.local/bin/agent`. Because `agent` is a generic name, two filters are applied:
 - **In tmux**: the window must be named `cursor*` — rename it with `tmux rename-window cursor`.
