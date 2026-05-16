@@ -56,6 +56,16 @@ Agents running outside tmux (in their own terminal window) are detected via `ps`
 
 Add `run.sh` as a Login Item in **System Settings → General → Login Items**.
 
+## Auto-start with tmux
+
+Alternatively, start the app lazily whenever you attach to tmux. Add to `~/.tmux.conf`:
+
+```tmux
+set-hook -g client-attached 'run-shell "pgrep -f agents.tmux/app.py >/dev/null || (nohup ~/dev/agents.tmux/run.sh >/tmp/agents.tmux.log 2>&1 &)"'
+```
+
+Reload with `tmux source-file ~/.tmux.conf`. The hook checks if `app.py` is already running and launches it in the background if not — so it's a no-op on subsequent attaches. Logs go to `/tmp/agents.tmux.log`.
+
 ## Configuration
 
 `config.toml` lives next to `app.py`, or at `~/.config/agents.tmux/config.toml` for a user-level install.
