@@ -1,1 +1,1 @@
-rumps>=0.4.0
+rumps>=0.4.0; platform_system == "Darwin"

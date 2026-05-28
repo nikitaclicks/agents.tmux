@@ -1,69 +1,48 @@
 #!/usr/bin/env python3
-"""macOS menu bar app showing tmux agent statuses."""
+"""agents.tmux presentation entry point."""
 
-import subprocess
-import rumps
-from tmux_agents import Agent, discover_agents, load_config
+import argparse
+import os
+import platform
 
-STATUS_ICON = {"busy": "⚡", "waiting": "💬", "idle": "○"}
+from frontends import print_waybar_snapshot, run_macos_app
 
 
-def _focus_window(target: str) -> None:
-    # Strip pane suffix: "main:5.1" → "main:5"
-    win_target = target.rsplit(".", 1)[0]
-    subprocess.Popen(["tmux", "select-window", "-t", win_target])
-    subprocess.Popen(
-        ["osascript", "-e", 'tell application "iTerm2" to activate'],
-        stderr=subprocess.DEVNULL,
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Run an agents.tmux presentation frontend.")
+    parser.add_argument(
+        "--frontend",
+        choices=["macos", "waybar"],
+        help="Frontend to run. Defaults to macOS on Darwin.",
+    )
+    return parser.parse_args()
+
+
+def _resolve_frontend(selected: str | None) -> str:
+    frontend = selected or os.environ.get("AGENTS_TMUX_FRONTEND")
+    if frontend:
+        return frontend
+    if platform.system() == "Darwin":
+        return "macos"
+    raise SystemExit(
+        "No default frontend on this platform. Use --frontend waybar "
+        "(or AGENTS_TMUX_FRONTEND=waybar)."
     )
 
 
-def _build_title(agents: list[Agent]) -> str:
-    if not agents:
-        return "◌"
-    busy    = sum(1 for a in agents if a.status == "busy")
-    waiting = sum(1 for a in agents if a.status == "waiting")
-    if busy == 0 and waiting == 0:
-        return "○"
-    if waiting == 0:
-        return f"🟢 {busy}"
-    if busy == 0:
-        return f"🔴 {waiting}"
-    return f"🟡 {waiting}"
+def main() -> int:
+    args = _parse_args()
+    frontend = _resolve_frontend(args.frontend)
 
+    if frontend == "macos":
+        run_macos_app()
+        return 0
+    if frontend == "waybar":
+        print_waybar_snapshot()
+        return 0
 
-class AgentsApp(rumps.App):
-    def __init__(self):
-        self._config = load_config()
-        super().__init__("◌", quit_button=None)
-        interval = self._config.get("poll_interval", 2)
-        rumps.Timer(self._poll, interval).start()
-        self._poll(None)
-
-    def _poll(self, _sender):
-        agents = discover_agents(self._config)
-        self.title = _build_title(agents)
-
-        self.menu.clear()
-
-        if not agents:
-            self.menu.add(rumps.MenuItem("No agents found"))
-        else:
-            for agent in agents:
-                s = STATUS_ICON[agent.status]
-                label = f"{agent.icon} {agent.name} @ {agent.window}  {s} {agent.status}"
-                self.menu.add(rumps.MenuItem(label, callback=self._make_focus_cb(agent.target)))
-                if agent.snippet:
-                    self.menu.add(rumps.MenuItem(f"   ↳ {agent.snippet[:72]}"))
-
-        self.menu.add(rumps.separator)
-        self.menu.add(rumps.MenuItem("Quit", callback=rumps.quit_application))
-
-    def _make_focus_cb(self, target: str):
-        def cb(_sender):
-            _focus_window(target)
-        return cb
+    raise SystemExit(f"Unsupported frontend: {frontend}")
 
 
 if __name__ == "__main__":
-    AgentsApp().run()
+    raise SystemExit(main())

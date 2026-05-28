@@ -1,6 +1,6 @@
 # agents.tmux
 
-macOS menu bar app that watches your tmux sessions and shows the live status of AI coding agents — Claude Code, GitHub Copilot, Cursor, Codex, opencode, pi, and anything you configure.
+Tmux agent status indicator with pluggable presentation frontends. Today it ships with a macOS menu bar frontend and a Waybar frontend, both powered by the same tmux agent discovery core.
 
 ![agents.tmux menu](assets/menu.png)
 
@@ -16,27 +16,48 @@ When you run multiple AI agents in parallel you constantly alt-tab to check if a
 | `○` | all idle |
 | `◌` | no agents found |
 
-Click the badge to see a per-agent status line and jump straight to its tmux window in iTerm2.
+Click the badge to see a per-agent status line and jump straight to its tmux window in iTerm2, or plug the same status snapshot into another desktop surface like Waybar.
 
 ## Requirements
 
-- macOS
-- Python 3.11+ (or 3.9+ with `pip install tomli`)
+- Python 3.11+
 - tmux
-- iTerm2 (optional — for the click-to-focus feature)
+- A presentation frontend:
+  - **macOS menu bar**: macOS + iTerm2 (optional, only for click-to-focus)
+  - **Waybar**: Linux/Wayland + Waybar
 
 ## Install
 
 ```bash
 git clone https://github.com/yourname/agents.tmux ~/dev/agents.tmux
 cd ~/dev/agents.tmux
-bash run.sh          # installs deps and starts the app
+pip3 install -r requirements.txt
 ```
 
-The menu bar icon appears immediately. To verify detection without the GUI:
+To verify detection without any frontend:
 
 ```bash
 python3 tmux_agents.py
+```
+
+### macOS menu bar
+
+```bash
+bash run.sh
+```
+
+### Waybar
+
+The Waybar frontend prints a single JSON snapshot suitable for `return-type = "json"`:
+
+```bash
+python3 app.py --frontend waybar
+```
+
+Or, if you prefer the existing launcher script:
+
+```bash
+bash run.sh --frontend waybar
 ```
 
 ```
@@ -53,13 +74,60 @@ Session: auto  |  Poll: 2s  |  Agents: ['claude', 'copilot', 'pi', 'cursor', 'op
 
 Agents running outside tmux (in their own terminal window) are detected via `ps` and shown with `[external]` as the window name.
 
+## Frontend architecture
+
+`tmux_agents.py` remains the discovery/detection layer. Presentation frontends consume a shared indicator snapshot from `indicator.py`, which means new targets can be added without reimplementing the status rules.
+
+Current frontends:
+
+- `macos` — launches the existing `rumps` menu bar app
+- `waybar` — prints one-line JSON with `text`, `alt`, `tooltip`, and CSS `class` values
+
+That shared snapshot is the seam for future integrations like SketchyBar or other desktop indicators.
+
+## Waybar integration
+
+Add a custom module that executes the Waybar frontend:
+
+```jsonc
+"custom/agents-tmux": {
+  "return-type": "json",
+  "exec": "python3 /home/your-user/dev/agents.tmux/app.py --frontend waybar",
+  "interval": 2,
+  "escape": true
+}
+```
+
+Then place `"custom/agents-tmux"` in one of your `modules-left`, `modules-center`, or `modules-right` arrays.
+
+The module emits these CSS classes so you can style states independently:
+
+- `empty`
+- `idle`
+- `busy`
+- `waiting`
+- `mixed`
+
+Example CSS:
+
+```css
+#custom-agents-tmux.waiting,
+#custom-agents-tmux.mixed {
+  color: #f9e2af;
+}
+
+#custom-agents-tmux.busy {
+  color: #a6e3a1;
+}
+```
+
 ## Run on login
 
-Add `run.sh` as a Login Item in **System Settings → General → Login Items**.
+On macOS, add `run.sh` as a Login Item in **System Settings → General → Login Items**.
 
 ## Auto-start with tmux
 
-Alternatively, start the app lazily whenever you attach to tmux. Add to `~/.tmux.conf`:
+Alternatively, start the macOS menu bar app lazily whenever you attach to tmux. Add to `~/.tmux.conf`:
 
 ```tmux
 set-hook -g client-attached 'run-shell "pgrep -f agents.tmux/app.py >/dev/null || (nohup ~/dev/agents.tmux/run.sh >/tmp/agents.tmux.log 2>&1 &)"'
@@ -69,7 +137,7 @@ Reload with `tmux source-file ~/.tmux.conf`. The hook checks if `app.py` is alre
 
 ## Configuration
 
-`config.toml` lives next to `app.py`, or at `~/.config/agents.tmux/config.toml` for a user-level install.
+`config.toml` lives next to `app.py`, or at `~/.config/agents.tmux/config.toml` for a user-level install. These detection settings are shared by every frontend.
 
 ```toml
 session = "auto"      # or a specific session name, e.g. "main"
@@ -212,8 +280,11 @@ The `waiting_tail_patterns` matched something in old scrollback. Either reduce `
 **Cursor not detected**
 If running inside tmux, rename the window to `cursor` with `tmux rename-window cursor`. If running externally, verify the binary path contains `cursor-agent` — check with `ps -A -o comm=,args= | grep agent`.
 
+**Waybar module is blank**
+Run `python3 app.py --frontend waybar` directly. If it prints JSON, the Waybar side is usually missing `return-type = "json"` or `escape = true`.
+
 **App doesn't start / `rumps` not found**
-Run `pip3 install rumps` manually, or use `bash run.sh` which installs deps automatically.
+Run `pip3 install rumps` manually on macOS, or use `bash run.sh` which installs platform-appropriate deps automatically.
 
 ## Contributing
 
@@ -221,6 +292,7 @@ The project is intentionally small — two files, one config. To add built-in su
 
 Pull requests welcome for:
 - New agent detection patterns
+- New presentation frontends (Waybar, SketchyBar, etc.)
 - Alternative terminal support (Warp, Ghostty, Terminal.app)
 - Linux / X11 equivalent of the iTerm2 focus call
 

@@ -1,4 +1,5 @@
 # agents.tmux configuration
+# Shared detection settings used by every presentation frontend.
 
 # Which tmux session to watch.
 # "auto" = deduplicate mirrored session groups by pane ID (recommended).
