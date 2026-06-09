@@ -64,8 +64,10 @@ busy_patterns = [
 waiting_tail_patterns = [
     'Asked user',
     'AskUser',
-    '↑↓ to select',     # interactive question dialog footer (copilot, claude)
-    'Enter to confirm', # same dialog, alternate marker
+    '↑↓ to select',          # interactive question dialog footer (copilot, claude)
+    'Enter to confirm',      # same dialog, alternate marker
+    'Do you want to proceed', # claude permission / plan-approval prompt
+    'Tab to amend',          # claude confirmation dialog footer (backup marker)
 ]
 
 # ── Agents ─────────────────────────────────────────────────────────────────

@@ -15,7 +15,7 @@ The counts **accumulate across every tmux server you have** — every local sock
 | `🟢 2` | 2 agents busy — you're free, go do something else |
 | `🟡 1` | 1 agent waiting for you, others still running — start wrapping up |
 | `🔴 2` | all 2 agents waiting on you — act now |
-| `○` | all idle |
+| `🔴 3` | all 3 agents idle/done, none working — act now |
 | `◌` | no agents found |
 
 Click the badge to see a per-agent status line and jump straight to its tmux window — your terminal is auto-detected and raised — or plug the same status snapshot into another desktop surface like Waybar.
@@ -125,22 +125,30 @@ Add a custom module that executes the Waybar frontend:
 
 Then place `"custom/agents-tmux"` in one of your `modules-left`, `modules-center`, or `modules-right` arrays.
 
-The module emits these CSS classes so you can style states independently:
+The module emits these CSS classes so you can style states independently. The badge
+emoji already encodes the color; match it in CSS for the bar text:
 
-- `empty`
-- `idle`
-- `busy`
-- `waiting`
-- `mixed`
+- `empty` — no agents
+- `busy` — green: agents working, you're free
+- `mixed` — yellow: some waiting on you, others still working
+- `waiting` — red: all waiting on you, act now
+- `idle` — red: all idle/done, nothing working, act now
 
 Example CSS:
 
 ```css
-#custom-agents-tmux.waiting,
+/* yellow: some need you, some still working */
 #custom-agents-tmux.mixed {
   color: #f9e2af;
 }
 
+/* red: nothing is progressing — go now */
+#custom-agents-tmux.waiting,
+#custom-agents-tmux.idle {
+  color: #f38ba8;
+}
+
+/* green: working, you're free */
 #custom-agents-tmux.busy {
   color: #a6e3a1;
 }

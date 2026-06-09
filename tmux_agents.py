@@ -70,8 +70,10 @@ DEFAULT_CONFIG = {
         "waiting_tail_patterns": [
             r"Asked user",
             r"AskUser",
-            r"↑↓ to select",       # interactive question dialog footer (copilot, claude)
-            r"Enter to confirm",   # same dialog, alternate marker
+            r"↑↓ to select",          # interactive question dialog footer (copilot, claude)
+            r"Enter to confirm",      # same dialog, alternate marker
+            r"Do you want to proceed", # claude permission / plan-approval prompt
+            r"Tab to amend",          # claude confirmation dialog footer (backup marker)
         ],
         # Lines matching any of these are skipped when picking the display snippet
         "skip_snippet_patterns": [

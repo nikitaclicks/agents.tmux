@@ -12,6 +12,21 @@ class IndicatorSnapshotTests(unittest.TestCase):
         self.assertEqual(snapshot.state, "empty")
         self.assertEqual(snapshot.tooltip, "agents.tmux\nNo agents found.")
 
+    def test_all_idle_is_red(self):
+        snapshot = build_indicator_snapshot([
+            Agent(
+                name="claude",
+                icon="◆",
+                window="main",
+                target="main:1.1",
+                status="idle",
+                snippet="❯",
+            ),
+        ])
+
+        self.assertTrue(snapshot.badge.startswith("🔴"))
+        self.assertEqual(snapshot.state, "idle")
+
     def test_waybar_prefers_waiting_snippet(self):
         snapshot = build_indicator_snapshot([
             Agent(

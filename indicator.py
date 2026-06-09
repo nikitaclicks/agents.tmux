@@ -61,7 +61,9 @@ def build_indicator_snapshot(agents: Sequence[Agent]) -> IndicatorSnapshot:
     idle = len(agents) - busy - waiting
 
     if busy == 0 and waiting == 0:
-        badge = "○"
+        # No agent is working and none are waiting → nothing is progressing.
+        # Red ("go now"): idle = done = not working, same call to action as waiting.
+        badge = f"🔴 {idle}"
         state = "idle"
     elif waiting == 0:
         badge = f"🟢 {busy}"
