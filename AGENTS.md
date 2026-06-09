@@ -19,6 +19,8 @@ Every `[[agents]]` block in `config.toml` supports these fields:
 | `args_pattern` | no | regex | Matched against the full process command line from `ps`; used for **external** detection when `process_pattern` can't match (e.g. binary path differs from exec name) |
 | `busy_patterns` | no | list of regexes | Searched in full pane text; any match → busy. Supplements global `busy_patterns` |
 | `idle_tail_patterns` | no | list of regexes | Searched in the last `tail_lines` of pane text; any match → idle (overrides default idle fallback) |
+| `prefer_snippet_patterns` | no | list of regexes | A matching captured line is preferred as the menu snippet over the bottom-up fallback. Merged with global `prefer_snippet_patterns` |
+| `skip_snippet_patterns` | no | list of regexes | Captured lines matching these are skipped when picking the fallback snippet. Merged with global `skip_snippet_patterns` |
 
 ---
 
@@ -184,8 +186,9 @@ args_pattern    = 'my-agent'           # used for external detection (matches fu
 
 ```toml
 [detection]
-cpu_busy_threshold = 10.0   # raise to 20.0 to ignore brief wake-ups; lower to 5.0 for light agents
-tail_lines         = 5      # lines searched for waiting/idle patterns; raise if prompts are multi-line
+cpu_busy_threshold    = 10.0   # raise to 20.0 to ignore brief wake-ups; lower to 5.0 for light agents
+tail_lines            = 5      # lines searched for waiting/idle patterns; raise if prompts are multi-line
+snippet_capture_lines = 30     # lines of scrollback captured for the menu snippet
 
 busy_patterns = [
     '✻ \w+…',           # Claude Code: active thinking
@@ -195,9 +198,17 @@ busy_patterns = [
 
 waiting_tail_patterns = ['Asked user', 'AskUser']
 
-# Lines skipped when picking the snippet shown under each agent in the menu
+# Lines preferred as the menu snippet (a match wins over the bottom-up fallback).
+# Empty globally; set per agent — e.g. claude prefers its last '⏺' output line.
+prefer_snippet_patterns = []
+
+# Lines skipped when picking the fallback snippet shown under each agent.
+# Includes the bare input prompt (❯/>) and empty input-box rows so an idle
+# agent shows its last real output line instead of an empty prompt.
 skip_snippet_patterns = [
     '^[─━—\-╰╭│├└┘┐┌]{5,}',
+    '^[>❯]$',                 # bare input prompt (claude uses ❯)
+    '^[│|]\s*[>❯]?\s*[│|]$',  # empty / bare-prompt input box row
     '^--\s*INSERT',
     '^⏵',
     '^[/·]\s*commands',
@@ -206,6 +217,20 @@ skip_snippet_patterns = [
     '^\s*$',
 ]
 ```
+
+### Snippet selection
+
+The line shown under each agent in the menu is picked from the last
+`snippet_capture_lines` of pane output:
+
+1. **Prefer pass** — scanned bottom-up, the first line matching any
+   `prefer_snippet_patterns` (global + per-agent) wins outright.
+2. **Fallback pass** — otherwise, the first line from the bottom not matching
+   any `skip_snippet_patterns` (global + per-agent).
+
+This is why an idle Claude pane shows its last `⏺` output line rather than the
+`❯` input box: claude sets `prefer_snippet_patterns = ['^⏺']` and skips its
+`✻`-prefixed thinking/spinner status line.
 
 ---
 

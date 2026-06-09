@@ -60,6 +60,14 @@ DEFAULT_CONFIG = {
     "detection": {
         "cpu_busy_threshold": 10.0,
         "tail_lines": 5,
+        # How many lines of pane scrollback to capture for snippet selection.
+        # Larger = more context above the input box to fall back to. Independent
+        # of tail_lines (which always slices the LAST N captured lines).
+        "snippet_capture_lines": 30,
+        # Lines matching any of these are PREFERRED as the display snippet, with
+        # priority over the bottom-up fallback (scanned bottom-up, first match
+        # wins). Merged global + per-agent, like busy_patterns. Use sparingly.
+        "prefer_snippet_patterns": [],
         # Searched in full pane text; any match → busy
         "busy_patterns": [
             r"✻ \w+…",          # Claude: active thinking (trailing … = still running)
@@ -78,6 +86,8 @@ DEFAULT_CONFIG = {
         # Lines matching any of these are skipped when picking the display snippet
         "skip_snippet_patterns": [
             r"^[─━—\-╰╭│├└┘┐┌]{5,}",
+            r"^[>❯]$",                      # bare input prompt (claude uses ❯ U+276F)
+            r"^[│|]\s*[>❯]?\s*[│|]$",       # empty / bare-prompt input box row
             r"^--\s*INSERT",
             r"^⏵",
             r"^[/·]\s*commands",
@@ -91,6 +101,14 @@ DEFAULT_CONFIG = {
             "name": "claude",
             "icon": "◆",
             "process_pattern": r"^\d+\.\d+\.\d+$",
+            # Prefer the last assistant/tool line (⏺ U+23FA) over the ❯ input box.
+            # ⏺ is often followed by a non-breaking space, so anchor on the glyph.
+            "prefer_snippet_patterns": [r"^⏺"],
+            # Skip the thinking/spinner status line in both forms ("✻ Brewed for
+            # 53s" and "✶ Spelunking… (…)") — it's status chrome, not output, and
+            # lingers above the input box when idle. The leading glyph cycles, so
+            # the class lists the spinner frames Claude uses.
+            "skip_snippet_patterns": [r"^[✻✽✶✢✳✷✸✹✺✲✱] \w"],
         },
         {
             "name": "copilot",
@@ -181,6 +199,8 @@ class _Rules:
     waiting_tail_res: list  # compiled — searched in tail only
     idle_tail_res: list     # compiled — searched in tail only
     skip_re: re.Pattern     # lines matching this are skipped for the snippet
+    prefer_res: list        # compiled — a matching line wins the snippet outright
+    snippet_capture_lines: int  # how many pane lines to capture for the snippet
 
 
 @dataclass
@@ -199,8 +219,13 @@ def _make_rules(config: dict, agent_def: dict) -> _Rules:
     waiting_tail = [re.compile(p) for p in det.get("waiting_tail_patterns", [])]
     idle_tail    = [re.compile(p) for p in agent_def.get("idle_tail_patterns", [])]
 
-    skip_parts = "|".join(f"(?:{p})" for p in det.get("skip_snippet_patterns", []))
+    # Skip + prefer lists merge global + per-agent, mirroring busy_patterns above.
+    skip_pats = det.get("skip_snippet_patterns", []) + agent_def.get("skip_snippet_patterns", [])
+    skip_parts = "|".join(f"(?:{p})" for p in skip_pats)
     skip_re = re.compile(skip_parts) if skip_parts else re.compile(r"^\x00$")
+
+    prefer_pats = det.get("prefer_snippet_patterns", []) + agent_def.get("prefer_snippet_patterns", [])
+    prefer_res = [re.compile(p) for p in prefer_pats]
 
     return _Rules(
         cpu_threshold=float(det.get("cpu_busy_threshold", 10.0)),
@@ -209,6 +234,8 @@ def _make_rules(config: dict, agent_def: dict) -> _Rules:
         waiting_tail_res=waiting_tail,
         idle_tail_res=idle_tail,
         skip_re=skip_re,
+        prefer_res=prefer_res,
+        snippet_capture_lines=int(det.get("snippet_capture_lines", 30)),
     )
 
 
@@ -279,12 +306,24 @@ def _classify_status(pane_text: str, rules: _Rules, pid: str = "") -> tuple[str,
     lines = pane_text.splitlines()
     non_empty = [l for l in lines if l.strip()]
 
+    # Prefer pass: a configured "interesting" line (e.g. Claude's last ⏺ output)
+    # wins outright, even over a more recent line below it. Bottom-up so the
+    # latest such line is chosen.
     snippet = ""
-    for line in reversed(non_empty):
-        stripped = line.strip()
-        if not rules.skip_re.match(stripped):
-            snippet = stripped[:80]
-            break
+    if rules.prefer_res:
+        for line in reversed(non_empty):
+            stripped = line.strip()
+            if any(r.search(stripped) for r in rules.prefer_res):
+                snippet = stripped[:80]
+                break
+
+    # Fallback pass: first non-skipped line from the bottom.
+    if not snippet:
+        for line in reversed(non_empty):
+            stripped = line.strip()
+            if not rules.skip_re.match(stripped):
+                snippet = stripped[:80]
+                break
 
     tail = "\n".join(lines[-rules.tail_lines:])
 
@@ -445,7 +484,8 @@ def _scan_socket(
                     continue
                 agent_pid = matched_proc.pid
 
-            pane_text = _run(_tmux(socket, "capture-pane", "-pt", target, "-S", "-10"))
+            depth = m["rules"].snippet_capture_lines
+            pane_text = _run(_tmux(socket, "capture-pane", "-pt", target, "-S", f"-{depth}"))
 
             if m["content_re"] and not m["content_re"].search(pane_text):
                 continue

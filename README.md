@@ -207,6 +207,10 @@ cpu_busy_threshold = 10.0
 # This prevents old scrollback text from triggering false "waiting" states.
 tail_lines = 5
 
+# How many lines of pane scrollback to capture for the menu snippet. Larger =
+# more context above the input box to fall back to. Independent of tail_lines.
+snippet_capture_lines = 30
+
 # Regexes searched in the full pane text; any match → busy.
 # These catch activity that shows in output before CPU ramps up.
 busy_patterns = [
@@ -218,11 +222,19 @@ busy_patterns = [
 # Regexes searched in the last tail_lines only; any match → waiting.
 waiting_tail_patterns = ['Asked user', 'AskUser']
 
+# Regexes preferred as the per-agent menu snippet — a matching line wins over
+# the bottom-up "first non-skipped line" fallback. Merged with per-agent lists.
+prefer_snippet_patterns = []
+
 # ── Agents ─────────────────────────────────────────────────────────────────
 [[agents]]
 name    = "claude"
 icon    = "◆"
 process_pattern = '^\d+\.\d+\.\d+$'   # Claude Code runs as its version binary
+# Show the last assistant/tool line (⏺) instead of the bare ❯ input box, and
+# skip the thinking/spinner status line ("✻ Brewed for 53s") that lingers idle.
+prefer_snippet_patterns = ['^⏺']
+skip_snippet_patterns   = ['^[✻✽✶✢✳✷✸✹✺✲✱] \w']
 
 [[agents]]
 name    = "copilot"
@@ -317,7 +329,7 @@ The commands run per poll tick (on each socket locally, and once per host remote
 
 ```bash
 tmux -S SOCKET list-panes -a -F '... #{pane_pid} #{pane_current_command}'
-tmux -S SOCKET capture-pane -pt TARGET -S -10   # per matched pane
+tmux -S SOCKET capture-pane -pt TARGET -S -N    # per matched pane (N = snippet_capture_lines)
 ps -p PID -o %cpu=                              # per matched agent
 ps -A -o pid=,pcpu=,comm=,args=                 # external scan
 ssh HOST python3 - --emit-json < tmux_agents.py # per remote host

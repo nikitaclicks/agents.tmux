@@ -51,6 +51,16 @@ cpu_busy_threshold = 10.0
 # triggering false waiting states.
 tail_lines = 5
 
+# How many lines of pane scrollback to capture for the menu snippet. Larger =
+# more context above the input box to fall back to. Independent of tail_lines
+# (which always slices the LAST N captured lines for waiting/idle detection).
+snippet_capture_lines = 30
+
+# Regex patterns that are PREFERRED as the menu snippet — a matching line wins
+# over the bottom-up fallback (scanned bottom-up, first match wins). Merged with
+# any per-agent prefer_snippet_patterns. Leave empty globally; set per agent.
+prefer_snippet_patterns = []
+
 # Regex patterns searched in the full pane text; any match → busy.
 # These supplement CPU detection for activity that shows in output before
 # the process ramps up measurable CPU (e.g. a tool call just starting).
@@ -78,12 +88,21 @@ waiting_tail_patterns = [
 #   content_pattern     — additional filter on pane text (for generic processes like node)
 #   busy_patterns       — extra regexes (full text) that mean this agent is busy
 #   idle_tail_patterns  — tail regexes that mean this agent is idle (e.g. input prompt)
+#   prefer_snippet_patterns — regexes preferred as the menu snippet (merged w/ global)
+#   skip_snippet_patterns   — regexes skipped when picking the snippet (merged w/ global)
 
 [[agents]]
 name    = "claude"
 icon    = "◆"
 # Claude Code runs as its own version-number binary (e.g. 2.1.142)
 process_pattern = '^\d+\.\d+\.\d+$'
+# Show the last assistant/tool line (⏺ U+23FA) instead of the bare ❯ input box.
+# ⏺ is often followed by a non-breaking space, so anchor on the glyph itself.
+prefer_snippet_patterns = ['^⏺']
+# Skip Claude's thinking/spinner status line ("✻ Brewed for 53s", "✶ Spelunking…
+# (…)") — it's status chrome, not output, and lingers above the box when idle.
+# The leading glyph cycles through the spinner frames listed in the class.
+skip_snippet_patterns = ['^[✻✽✶✢✳✷✸✹✺✲✱] \w']
 
 [[agents]]
 name    = "copilot"
