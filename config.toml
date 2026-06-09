@@ -9,6 +9,33 @@ session = "auto"
 # How often to poll tmux panes (seconds)
 poll_interval = 2
 
+# ── Local sockets ────────────────────────────────────────────────────────
+# Agents are summed across EVERY live tmux server (socket) on this machine,
+# not just the default one. Use globs to exclude or restrict sockets.
+# Empty ignore list = count every live socket.
+ignore_sockets = []            # e.g. ["mytest*"] to skip throwaway test fixtures
+# allow_sockets = ["default"]  # opt-in allowlist instead (omit = allow all)
+
+# ── Remote hosts (SSH) ─────────────────────────────────────────────────────
+# Agents on remote machines are pulled over SSH and added to the same counts.
+# Zero-install: this script is piped to the remote's python3 each poll, so the
+# remote needs only python3 + tmux, nothing installed.
+auto_discover_remote = true    # find hosts from live `ssh <host>` sessions in `ps`
+remote_hosts = []              # pin hosts to always pull, e.g. ["myserver"]
+ignore_hosts = []              # skip these (e.g. ["github.com"] — non-shell ssh)
+# allow_hosts = []             # opt-in allowlist (omit = allow all discovered)
+remote_poll_interval = 6       # seconds; remotes polled less often than local
+remote_timeout = 8             # seconds; per-host hard deadline
+remote_error_cooldown = 60     # seconds to skip a host after a failed pull
+# SSH options applied to every remote call. BatchMode = fail fast (never hang)
+# if a host needs a password; ControlMaster/Persist keep the connection warm.
+ssh_options = [
+    "-o", "ConnectTimeout=4",
+    "-o", "BatchMode=yes",
+    "-o", "ControlMaster=auto",
+    "-o", "ControlPersist=60s",
+]
+
 # ── Detection rules ────────────────────────────────────────────────────────
 # Controls how pane output is classified as busy / waiting / idle.
 # You can tune these without touching any Python.
@@ -66,8 +93,9 @@ busy_patterns = ['Esc to cancel']
 [[agents]]
 name    = "pi"
 icon    = "π"
-# pi runs as node — narrow by its token-budget status bar (always in last 2 lines)
-process_pattern = '^node$'
+# pi runs as a bare `node` on some hosts and as a native `pi` binary on others;
+# the token-budget status bar (content_pattern) is the real discriminator.
+process_pattern = '^(node|pi)$'
 content_pattern = '\d+\.\d+%/\d+k'
 # pi's "──── INSERT" prompt in the tail means it's at the input prompt = idle
 idle_tail_patterns = ['─{4,}\s*INSERT']
@@ -75,12 +103,12 @@ idle_tail_patterns = ['─{4,}\s*INSERT']
 [[agents]]
 name    = "cursor"
 icon    = "⌶"
-# cursor-agent runs as /Users/$USER/.local/bin/agent (exec -a preserves the name)
-process_pattern = '^agent$'
-# window_pattern: used when cursor runs inside a tmux pane (name the window "cursor")
-window_pattern  = '^cursor'
-# args_pattern: used when cursor runs outside tmux — matches the full command line
-args_pattern    = 'cursor.agent'
+# cursor-agent's pane command is `agent` on some launches and `node` on others,
+# so match either and use the cursor-agent path in the process args as the real
+# discriminator — works regardless of the tmux window name.
+process_pattern   = '^(agent|node)$'
+tmux_args_pattern = 'cursor.agent'   # in tmux: a descendant process matches this
+args_pattern      = 'cursor.agent'   # external: matches the full command line
 
 [[agents]]
 name    = "opencode"

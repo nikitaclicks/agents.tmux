@@ -1,9 +1,22 @@
 #!/usr/bin/env python3
-"""Tmux agent discovery and status detection."""
+"""Tmux agent discovery and status detection.
 
+Discovery accumulates agents across every live local tmux socket and, optionally,
+across remote hosts reached over SSH. Remote discovery is zero-install: this very
+script is piped to the remote's ``python3`` in ``--emit-json`` mode, so the remote
+runs the identical detection logic and returns its agents as JSON.
+"""
+
+import base64
+import json
+import os
 import re
 import subprocess
-from dataclasses import dataclass
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict, dataclass
+from fnmatch import fnmatch
 from pathlib import Path
 
 try:
@@ -18,9 +31,32 @@ except ImportError:
 # Config
 # ---------------------------------------------------------------------------
 
+# SSH options applied to every remote call. BatchMode makes a host that needs a
+# password fail fast instead of hanging; ControlMaster/Persist keep the first
+# connection warm so subsequent polls reuse it (no per-poll handshake).
+DEFAULT_SSH_OPTIONS = [
+    "-o", "ConnectTimeout=4",
+    "-o", "BatchMode=yes",
+    "-o", "ControlMaster=auto",
+    "-o", "ControlPersist=60s",
+]
+
 DEFAULT_CONFIG = {
     "session": "auto",
     "poll_interval": 2,
+    # ── Local sockets ──────────────────────────────────────────────────────
+    # Empty globs = count every live socket. Users add their own patterns.
+    "ignore_sockets": [],
+    # "allow_sockets": [],  # opt-in allowlist instead (omitted = allow all)
+    # ── Remote hosts ───────────────────────────────────────────────────────
+    "auto_discover_remote": True,   # find hosts from live `ssh <host>` clients
+    "remote_hosts": [],             # always-pull pinned hosts
+    "ignore_hosts": [],             # skip these hosts (e.g. non-shell ssh targets)
+    # "allow_hosts": [],            # opt-in allowlist (omitted = allow all)
+    "remote_poll_interval": 6,      # seconds; remotes polled less often than local
+    "remote_timeout": 8,            # seconds; per-host hard deadline
+    "remote_error_cooldown": 60,    # seconds to skip a host after a failure
+    "ssh_options": DEFAULT_SSH_OPTIONS,
     "detection": {
         "cpu_busy_threshold": 10.0,
         "tail_lines": 5,
@@ -63,17 +99,21 @@ DEFAULT_CONFIG = {
         {
             "name": "pi",
             "icon": "π",
-            "process_pattern": r"^node$",
+            # pi runs as a bare `node` on some hosts and as a native `pi` binary
+            # on others; the content_pattern below is the real discriminator.
+            "process_pattern": r"^(node|pi)$",
             "content_pattern": r"\d+\.\d+%/\d+k",
             "idle_tail_patterns": [r"─{4,}\s*INSERT"],
         },
         {
             "name": "cursor",
             "icon": "⌶",
-            "process_pattern": r"^agent$",
-            # window_pattern for tmux pane detection; args_pattern for external processes
-            "window_pattern": r"^cursor",
-            "args_pattern": r"cursor.agent",
+            # cursor-agent's pane command is `agent` on some launches and `node`
+            # on others; the cursor-agent path in the process args is the real
+            # discriminator (works regardless of tmux window name).
+            "process_pattern": r"^(agent|node)$",
+            "tmux_args_pattern": r"cursor.agent",  # in tmux: a descendant proc matches
+            "args_pattern": r"cursor.agent",       # external: matches the command line
         },
         {
             "name": "opencode",
@@ -97,6 +137,17 @@ _CONFIG_PATHS = [
     Path(__file__).parent / "config.toml",
     Path.home() / ".config" / "agents.tmux" / "config.toml",
 ]
+
+# Per-pane format shared by every socket scan.
+_PANE_FORMAT = (
+    "#{session_name}:#{window_index}.#{pane_index} #{pane_id} #{pane_pid} "
+    "#{window_name} #{pane_current_command}"
+)
+
+# Keys of the config that are portable to a remote (detection rules only).
+# Remote-orchestration keys are deliberately excluded so a remote never recurses
+# into pulling its own remotes.
+_PORTABLE_CONFIG_KEYS = ("session", "detection", "agents")
 
 
 def load_config() -> dict:
@@ -159,6 +210,22 @@ def _make_rules(config: dict, agent_def: dict) -> _Rules:
     )
 
 
+def _build_matchers(config: dict) -> list[dict]:
+    matchers = []
+    for ag in config.get("agents", DEFAULT_CONFIG["agents"]):
+        matchers.append({
+            "name": ag["name"],
+            "icon": ag.get("icon", "?"),
+            "process_re": re.compile(ag["process_pattern"]),
+            "window_re":  re.compile(ag["window_pattern"])  if ag.get("window_pattern")  else None,
+            "content_re": re.compile(ag["content_pattern"]) if ag.get("content_pattern") else None,
+            "tmux_args_re": re.compile(ag["tmux_args_pattern"]) if ag.get("tmux_args_pattern") else None,
+            "args_re":    re.compile(ag["args_pattern"])    if ag.get("args_pattern")    else None,
+            "rules": _make_rules(config, ag),
+        })
+    return matchers
+
+
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
@@ -171,17 +238,27 @@ class Agent:
     target: str
     status: str   # "busy" | "waiting" | "idle"
     snippet: str
+    source: str = "local"  # "local" = this machine; otherwise the remote host name
 
 
 # ---------------------------------------------------------------------------
 # Subprocess helper
 # ---------------------------------------------------------------------------
 
-def _run(cmd: list[str]) -> str:
+def _run(cmd: list[str], timeout: float | None = None) -> str:
     try:
-        return subprocess.check_output(cmd, stderr=subprocess.DEVNULL, text=True)
-    except subprocess.CalledProcessError:
+        return subprocess.check_output(
+            cmd, stderr=subprocess.DEVNULL, text=True, timeout=timeout
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
         return ""
+
+
+def _tmux(socket: str | None, *args: str) -> list[str]:
+    """Build a tmux command targeting a specific socket (or the default)."""
+    if socket:
+        return ["tmux", "-S", socket, *args]
+    return ["tmux", *args]
 
 
 # ---------------------------------------------------------------------------
@@ -272,41 +349,66 @@ def _pane_procs(pane_pid: str, by_pid: dict[str, _Proc], children: dict[str, lis
     return procs
 
 
+def _tmux_tmpdir() -> Path:
+    base = os.environ.get("TMUX_TMPDIR", "/tmp")
+    return Path(base) / f"tmux-{os.getuid()}"
+
+
+def _local_sockets(config: dict) -> list[str | None]:
+    """Every live tmux socket on this machine, after allow/ignore filtering.
+
+    Returns socket *paths* (passed via ``tmux -S``). Falls back to ``[None]``
+    (the default socket via plain ``tmux``) when the socket dir is unavailable.
+    """
+    d = _tmux_tmpdir()
+    if not d.is_dir():
+        return [None]
+
+    ignore = config.get("ignore_sockets", []) or []
+    allow = config.get("allow_sockets") or None
+
+    sockets: list[str | None] = []
+    try:
+        entries = sorted(d.iterdir())
+    except OSError:
+        return [None]
+
+    for p in entries:
+        try:
+            if not p.is_socket():
+                continue
+        except OSError:
+            continue
+        name = p.name
+        if any(fnmatch(name, g) for g in ignore):
+            continue
+        if allow and not any(fnmatch(name, g) for g in allow):
+            continue
+        # Liveness pre-filter: a dead socket file has no server answering.
+        if not _run(_tmux(str(p), "list-sessions"), timeout=2).strip():
+            continue
+        sockets.append(str(p))
+
+    return sockets or [None]
+
+
 # ---------------------------------------------------------------------------
-# Discovery
+# Local discovery
 # ---------------------------------------------------------------------------
 
-def discover_agents(config: dict | None = None) -> list[Agent]:
-    if config is None:
-        config = load_config()
+def _scan_socket(
+    socket: str | None,
+    session: str,
+    matchers: list[dict],
+    proc_by_pid: dict[str, _Proc],
+    proc_children: dict[str, list[_Proc]],
+    seen_pids: set[str],
+) -> list[Agent]:
+    raw = _run(_tmux(socket, "list-panes", "-a", "-F", _PANE_FORMAT))
 
-    session = config.get("session", "auto")
-    agent_defs = config.get("agents", DEFAULT_CONFIG["agents"])
-
-    matchers = []
-    for ag in agent_defs:
-        matchers.append({
-            "name": ag["name"],
-            "icon": ag.get("icon", "?"),
-            "process_re": re.compile(ag["process_pattern"]),
-            "window_re":  re.compile(ag["window_pattern"])  if ag.get("window_pattern")  else None,
-            "content_re": re.compile(ag["content_pattern"]) if ag.get("content_pattern") else None,
-            "tmux_args_re": re.compile(ag["tmux_args_pattern"]) if ag.get("tmux_args_pattern") else None,
-            "args_re":    re.compile(ag["args_pattern"])    if ag.get("args_pattern")    else None,
-            "rules": _make_rules(config, ag),
-        })
-
-    raw = _run([
-        "tmux", "list-panes", "-a",
-        "-F", "#{session_name}:#{window_index}.#{pane_index} #{pane_id} #{pane_pid} #{window_name} #{pane_current_command}",
-    ])
-    proc_by_pid, proc_children = _process_snapshot()
-
-    seen_pane_ids: set[str] = set()
-    seen_pids: set[str] = set()   # PIDs already accounted for by matched tmux panes
+    seen_pane_ids: set[str] = set()  # per-socket: pane ids repeat across servers
     agents: list[Agent] = []
 
-    # --- tmux pane scan ---
     for line in raw.splitlines():
         parts = line.split(" ", 4)
         if len(parts) != 5:
@@ -341,7 +443,7 @@ def discover_agents(config: dict | None = None) -> list[Agent]:
                     continue
                 agent_pid = matched_proc.pid
 
-            pane_text = _run(["tmux", "capture-pane", "-pt", target, "-S", "-10"])
+            pane_text = _run(_tmux(socket, "capture-pane", "-pt", target, "-S", "-10"))
 
             if m["content_re"] and not m["content_re"].search(pane_text):
                 continue
@@ -358,7 +460,12 @@ def discover_agents(config: dict | None = None) -> list[Agent]:
             seen_pids.update(p.pid for p in pane_procs)
             break
 
-    # --- external process scan (agents running outside tmux) ---
+    return agents
+
+
+def _scan_external(matchers: list[dict], seen_pids: set[str]) -> list[Agent]:
+    """Agents running outside tmux (host-global; run once per machine)."""
+    agents: list[Agent] = []
     # ps: pid, %cpu, comm (basename), args (full command line)
     ps_raw = _run(["ps", "-A", "-o", "pid=,pcpu=,comm=,args="])
     for line in ps_raw.splitlines():
@@ -406,11 +513,220 @@ def discover_agents(config: dict | None = None) -> list[Agent]:
     return agents
 
 
+def discover_local_agents(config: dict | None = None) -> list[Agent]:
+    """Discover agents across every live tmux socket on THIS machine."""
+    if config is None:
+        config = load_config()
+
+    session = config.get("session", "auto")
+    matchers = _build_matchers(config)
+    proc_by_pid, proc_children = _process_snapshot()
+
+    seen_pids: set[str] = set()
+    agents: list[Agent] = []
+    for socket in _local_sockets(config):
+        agents.extend(
+            _scan_socket(socket, session, matchers, proc_by_pid, proc_children, seen_pids)
+        )
+    agents.extend(_scan_external(matchers, seen_pids))
+
+    for a in agents:
+        a.source = "local"
+    return agents
+
+
 # ---------------------------------------------------------------------------
-# Smoke test
+# Remote discovery (pull model, zero-install)
 # ---------------------------------------------------------------------------
 
+# host -> (fetched_at_monotonic, agents, ttl_seconds)
+_remote_cache: dict[str, tuple[float, list[Agent], float]] = {}
+
+# ssh option flags that consume the following token as their value.
+_SSH_OPTS_WITH_ARG = {
+    "-o", "-i", "-p", "-l", "-F", "-L", "-R", "-D", "-J", "-W",
+    "-b", "-c", "-m", "-O", "-Q", "-S", "-w", "-e",
+}
+
+
+def _parse_ssh_host(args: str) -> str | None:
+    """Extract the destination host from an `ssh ...` command line, or None."""
+    toks = args.split()
+    if not toks:
+        return None
+    if not (toks[0] == "ssh" or toks[0].endswith("/ssh")):
+        return None
+    i = 1
+    while i < len(toks):
+        t = toks[i]
+        if t.startswith("-"):
+            if len(t) == 2 and t in _SSH_OPTS_WITH_ARG:
+                i += 2
+            else:
+                i += 1
+            continue
+        host = t.split("@", 1)[1] if "@" in t else t
+        return host
+    return None
+
+
+def _ssh_hosts_from_ps() -> set[str]:
+    hosts: set[str] = set()
+    raw = _run(["ps", "-A", "-o", "args="])
+    for line in raw.splitlines():
+        host = _parse_ssh_host(line.strip())
+        if host:
+            hosts.add(host)
+    return hosts
+
+
+def _remote_hosts(config: dict) -> list[str]:
+    hosts: set[str] = set(config.get("remote_hosts", []) or [])
+    if config.get("auto_discover_remote", True):
+        hosts |= _ssh_hosts_from_ps()
+
+    ignore = set(config.get("ignore_hosts", []) or [])
+    allow = config.get("allow_hosts") or None
+
+    out = []
+    for h in hosts:
+        if h in ignore:
+            continue
+        if allow and h not in allow:
+            continue
+        out.append(h)
+    return sorted(out)
+
+
+def _config_b64(config: dict) -> str:
+    portable = {k: config[k] for k in _PORTABLE_CONFIG_KEYS if k in config}
+    return base64.b64encode(json.dumps(portable).encode()).decode()
+
+
+def discover_remote_agents(
+    host: str,
+    config: dict,
+    script: str | None = None,
+    config_b64: str | None = None,
+) -> list[Agent]:
+    """Pull agents from a remote host by piping THIS script to its python3.
+
+    Raises on any failure (unreachable, no python, auth needed, timeout) so the
+    caller can apply an error cooldown.
+    """
+    if script is None:
+        script = Path(__file__).read_text()
+    if config_b64 is None:
+        config_b64 = _config_b64(config)
+
+    ssh_opts = config.get("ssh_options", DEFAULT_SSH_OPTIONS)
+    timeout = config.get("remote_timeout", 8)
+    cmd = ["ssh", *ssh_opts, host, "python3", "-", "--emit-json", "--config-b64", config_b64]
+
+    proc = subprocess.run(
+        cmd, input=script, text=True, capture_output=True, timeout=timeout
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"ssh {host}: {proc.stderr.strip()[:200]}")
+
+    agents = []
+    for d in json.loads(proc.stdout):
+        agents.append(Agent(
+            name=d["name"],
+            icon=d["icon"],
+            window=d["window"],
+            target=d["target"],
+            status=d["status"],
+            snippet=d.get("snippet", ""),
+            source=host,
+        ))
+    return agents
+
+
+def _pull_remotes(hosts: list[str], config: dict) -> list[Agent]:
+    """Pull stale hosts concurrently; serve fresh ones from cache."""
+    poll = config.get("remote_poll_interval", 6)
+    cooldown = config.get("remote_error_cooldown", 60)
+    now = time.monotonic()
+
+    def fresh(h: str) -> bool:
+        e = _remote_cache.get(h)
+        return bool(e) and (now - e[0]) < e[2]
+
+    stale = [h for h in hosts if not fresh(h)]
+    if stale:
+        script = Path(__file__).read_text()
+        cfg_b64 = _config_b64(config)
+        with ThreadPoolExecutor(max_workers=min(8, len(stale))) as ex:
+            futs = {
+                ex.submit(discover_remote_agents, h, config, script, cfg_b64): h
+                for h in stale
+            }
+            for fut in as_completed(futs):
+                h = futs[fut]
+                try:
+                    agents, ttl = fut.result(), poll
+                except Exception:
+                    agents, ttl = [], cooldown
+                _remote_cache[h] = (time.monotonic(), agents, ttl)
+
+    # Evict cache entries for hosts no longer present.
+    for h in list(_remote_cache):
+        if h not in hosts:
+            del _remote_cache[h]
+
+    out: list[Agent] = []
+    for h in hosts:
+        e = _remote_cache.get(h)
+        if e:
+            out.extend(e[1])
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Top-level discovery
+# ---------------------------------------------------------------------------
+
+def discover_agents(config: dict | None = None) -> list[Agent]:
+    """Agents across all local sockets plus any reachable remote hosts."""
+    if config is None:
+        config = load_config()
+
+    agents = discover_local_agents(config)
+
+    if config.get("auto_discover_remote", True) or config.get("remote_hosts"):
+        hosts = _remote_hosts(config)
+        if hosts:
+            agents += _pull_remotes(hosts, config)
+
+    return agents
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def _config_from_argv() -> dict:
+    """Build config for --emit-json runs, optionally from a --config-b64 blob."""
+    cfg = DEFAULT_CONFIG
+    if "--config-b64" in sys.argv:
+        i = sys.argv.index("--config-b64")
+        loaded = json.loads(base64.b64decode(sys.argv[i + 1]))
+        cfg = {**DEFAULT_CONFIG, **loaded}
+        if "detection" in loaded:
+            cfg["detection"] = {**DEFAULT_CONFIG["detection"], **loaded["detection"]}
+    return cfg
+
+
 if __name__ == "__main__":
+    # --emit-json: print THIS machine's agents as JSON. Used both for local
+    # inspection and as the remote entrypoint when piped over ssh. It calls
+    # discover_local_agents (never discover_agents), so a remote never recurses.
+    if "--emit-json" in sys.argv:
+        cfg = _config_from_argv()
+        print(json.dumps([asdict(a) for a in discover_local_agents(cfg)]))
+        raise SystemExit(0)
+
     cfg = load_config()
     print(f"Session: {cfg['session']}  |  Poll: {cfg['poll_interval']}s  |  Agents: {[a['name'] for a in cfg['agents']]}\n")
     agents = discover_agents(cfg)
@@ -418,4 +734,5 @@ if __name__ == "__main__":
         print("No agents found.")
     for a in agents:
         icon = {"busy": "⚡", "waiting": "💬", "idle": "○"}[a.status]
-        print(f"{icon} {a.icon} {a.name:8s} @ {a.window:15s} [{a.status:7s}]  {a.snippet}")
+        where = a.window if a.source == "local" else f"{a.source}:{a.window}"
+        print(f"{icon} {a.icon} {a.name:8s} @ {where:20s} [{a.status:7s}]  {a.snippet}")

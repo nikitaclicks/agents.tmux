@@ -20,6 +20,7 @@ class IndicatorItem:
     label: str
     snippet: str
     focusable: bool
+    source: str = "local"
 
 
 @dataclass(frozen=True)
@@ -102,15 +103,18 @@ def render_waybar_json(snapshot: IndicatorSnapshot) -> str:
 
 
 def _build_item(agent: Agent) -> IndicatorItem:
+    source = getattr(agent, "source", "local")
+    location = agent.window if source == "local" else f"{source}:{agent.window}"
     return IndicatorItem(
         name=agent.name,
         icon=agent.icon,
         window=agent.window,
         target=agent.target,
         status=agent.status,
-        label=f"{agent.icon} {agent.name} @ {agent.window}  {STATUS_ICON[agent.status]} {agent.status}",
+        label=f"{agent.icon} {agent.name} @ {location}  {STATUS_ICON[agent.status]} {agent.status}",
         snippet=agent.snippet,
         focusable=can_focus_target(agent.target),
+        source=source,
     )
 
 
